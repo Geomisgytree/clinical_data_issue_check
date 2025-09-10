@@ -1,0 +1,169 @@
+
+##### load_dataset #####
+
+load_dataset <- function(path,
+                         pattern = "\\.sas7bdat$",
+                         exclude_prefixes = c("sys", "cdms"),
+                         exclude_names = c("record_count", "rtsm_sbjct_data"),
+                         assign_env = .GlobalEnv) {
+  # list all the files
+  all_files <- list.files(path, pattern = pattern, full.names = TRUE)
+  # generate the dataset names
+  dataset_names <- gsub("^.*/|\\.sas7bdat$", "", all_files)
+  
+  # exclude unwanted datasets
+  exclude_idx <- Reduce(`|`, lapply(exclude_prefixes, function(pref) {
+    grepl(paste0("^", pref), dataset_names, ignore.case = TRUE)
+  }))
+  exclude_idx <- exclude_idx | dataset_names %in% exclude_names
+  files_keep <- all_files[!exclude_idx]
+  names_keep <- dataset_names[!exclude_idx]
+  
+  # read non-NA datasets
+  data_list <- list()
+  for (i in seq_along(files_keep)) {
+    df <- read_sas(files_keep[i])
+    if (nrow(df) == 0) next ## read non-empty datasets
+    nm <- names_keep[i]
+    data_list[[nm]] <- df
+  }
+  
+  if (!is.null(assign_env) && length(data_list) > 0) {
+    list2env(data_list, envir = assign_env)
+  }
+  
+  message("Datasets load completed! :)")
+  return(data_list)
+}
+
+
+##### Useful functions #####
+## (1) Input: 1,2,3,4,6; Output: 1-4, 6
+compress_ranges <- function(x) {
+  x <- sort(as.integer(x))
+  if (length(x) == 0) return("")
+  
+  # Identify breaks in consecutive numbers
+  breaks <- c(0, which(diff(x) != 1), length(x))
+  result <- c()
+  
+  for (i in seq_along(breaks)[-length(breaks)]) {
+    group <- x[(breaks[i]+1):breaks[i+1]]
+    if (length(group) == 1) {
+      result <- c(result, as.character(group))
+    } else {
+      result <- c(result, paste0(group[1], "-", group[length(group)]))
+    }
+  }
+  paste(result, collapse = ", ")
+}
+
+safe_as_character <- function(x) {
+  if (is.character(x)) {
+    return(x)  # keep NA if it's already character
+  }
+  out <- as.character(x)
+  out[is.na(x)] <- NA  
+  return(out)
+}
+
+convert_dates_to_char <- function(df, date_format = "%Y-%m-%d", dttm_format = "%Y-%m-%d %H:%M:%S") {
+  df[] <- lapply(df, function(x) {
+    if (inherits(x, "Date")) {
+      format(x, date_format)
+    } else if (inherits(x, c("POSIXct", "POSIXlt"))) {
+      format(x, dttm_format)
+    } else {
+      x
+    }
+  })
+  return(df)
+}
+
+raw_process <- function(raw, issue){
+  raw <- raw %>% 
+    mutate(Issue_type = "Automatic", 
+           Issue_noted_by_Lilly_Stats = issue,
+           PPD_Comment_or_resolution = "",
+           Status = "New")
+  return(raw)
+}
+
+
+create_readme_sheet <- function(wb) {
+  if ("READ_ME" %in% names(wb)) removeWorksheet(wb, "READ_ME")
+  addWorksheet(wb, "READ_ME", tabColour = "orange")
+  
+  last_run <- format(Sys.time(), "%b %d, %Y at %I:%M %p EST")
+  
+  intro_text <- c(
+    paste("Raw Data Issue Tracker for ", STUDY_NAME),
+    "",
+    paste("Last run:", last_run),
+    "",
+    "This Excel file summarizes raw data issues identified from raw datasets.", 
+    "It is designed to help identify discrepancies and quality issues across various source datasets,",
+    "including non-standard issues, common issues, and dataset-specific issues.",
+    "",
+    "The table below describes non-standard issues found in four key tabs (highlighted in yellow):",
+    ""
+  )
+  writeData(wb, sheet="READ_ME", x=intro_text, startCol=1, startRow=1)
+  
+  # Part 2: Table for non-standard issue check
+  table_data <- all_check %>% 
+    filter(OUTPUT_TAB != "ALL_DATASETS") %>% 
+    distinct(OUTPUT_TAB, CHECKPOINT) %>% 
+    rename(Tab_name = OUTPUT_TAB, Checkpoint = CHECKPOINT)
+  
+  table_start_row <- length(intro_text) + 1
+  writeData(wb, sheet = "READ_ME", x = table_data,
+            startCol = 1, startRow = table_start_row, borders = "columns")
+  
+  # Part 3: Description Text
+  ## 1. Common issues: unique values of CHECKPOINT where OUTPUT_TAB = "ALL_DATASETS"
+  common_issues <- all_check %>% 
+    filter(OUTPUT_TAB == "ALL_DATASETS") %>% 
+    distinct(CHECKPOINT) %>% 
+    pull(CHECKPOINT)
+  
+  common_text <- c(
+    "",
+    "Other issues are organized in dataset-specific tabs and include the following types:",
+    "",
+    "1. **Common issues**, i.e., issues occur in most/all datasets, include:"
+  )
+  common_text <- c(common_text, paste0("-- ", common_issues))
+  
+  ## 2.  Dataset-specific issues: DATASET:CHECKPOINT unique combination in SINGLE_DATASETS sheet
+  dataset_specific <- simple_check %>%
+    distinct(DATASET, CHECKPOINT) %>%
+    mutate(text = paste0("-- For ", DATASET, ": ", CHECKPOINT)) %>%
+    pull(text)
+  
+  dataset_specific_text <- c(
+    "",
+    "2. Dataset-specific issues, include:",
+    dataset_specific
+  )
+  
+  notes_text <- c(
+    "",
+    "Notes:",
+    "-- This sheet can be both AUTOMATICALLY (using the issue tracker program) and MANUALLY updated",
+    "-- Issue type is reflected in the \"Issue_type\" variable, Please type in 'Manual' if the issue(s) were not automatically generated by the issue tracker program",
+    "",
+    "Additional Details TBD..."
+  )
+  
+  description_text <- c(common_text, dataset_specific_text, notes_text)
+  
+  description_start_row <- table_start_row + nrow(table_data) + 2
+  writeData(wb, sheet="READ_ME", x=description_text,
+            startCol=1, startRow=description_start_row)
+  
+  return(wb)
+}
+
+
+
